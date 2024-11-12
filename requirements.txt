@@ -1,7 +1,8 @@
 pdfplumber==0.11.4
 Requests==2.32.3
-spacy==3.8.2
 streamlit==1.40.0
 streamlit_chat==0.1.1
 Wikipedia_API==0.7.1
+spacy==3.5.2
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.5.0/en_core_web_sm-3.5.0.tar.gz
+
