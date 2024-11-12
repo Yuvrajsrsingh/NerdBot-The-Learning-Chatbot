@@ -5,18 +5,16 @@ import wikipediaapi
 import pdfplumber  
 import spacy
 import re
-import io
+
 import subprocess
 
-# Check if the model is available and download if necessary
+# Try to load SpaCy model, if not found download it
 try:
     nlp = spacy.load("en_core_web_sm")
 except OSError:
     print("Downloading SpaCy 'en_core_web_sm' model...")
     subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
     nlp = spacy.load("en_core_web_sm")
-# Load SpaCy model
-nlp = spacy.load("en_core_web_sm")
 
 # Wikipedia API setup
 wiki_wiki = wikipediaapi.Wikipedia(
