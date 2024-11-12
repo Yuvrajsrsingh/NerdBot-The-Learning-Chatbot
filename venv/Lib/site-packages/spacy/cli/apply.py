@@ -1,15 +1,18 @@
+import tqdm
+import srsly
+
 from itertools import chain
 from pathlib import Path
-from typing import Iterable, List, Optional, Union, cast
+from typing import Optional, List, Iterable, cast, Union
 
-import srsly
-import tqdm
 from wasabi import msg
 
+from ._util import app, Arg, Opt, setup_gpu, import_code, walk_directory
+
 from ..tokens import Doc, DocBin
-from ..util import ensure_path, load_model
 from ..vocab import Vocab
-from ._util import Arg, Opt, app, import_code, setup_gpu, walk_directory
+from ..util import ensure_path, load_model
+
 
 path_help = """Location of the documents to predict on.
 Can be a single file in .spacy format or a .jsonl file.
@@ -133,9 +136,7 @@ def apply(
     if len(text_files) > 0:
         streams.append(_stream_texts(text_files))
     datagen = cast(DocOrStrStream, chain(*streams))
-    for doc in tqdm.tqdm(
-        nlp.pipe(datagen, batch_size=batch_size, n_process=n_process), disable=None
-    ):
+    for doc in tqdm.tqdm(nlp.pipe(datagen, batch_size=batch_size, n_process=n_process)):
         docbin.add(doc)
     if output_file.suffix == "":
         output_file = output_file.with_suffix(".spacy")

@@ -1,20 +1,13 @@
-import logging
-from pathlib import Path
 from typing import Optional
-
-import typer
+from pathlib import Path
 from wasabi import msg
+import typer
+import logging
 
+from ._util import app, Arg, Opt, parse_config_overrides, show_validation_error
+from ._util import import_code
 from .. import util
 from ..util import get_sourced_components, load_model_from_config
-from ._util import (
-    Arg,
-    Opt,
-    app,
-    import_code,
-    parse_config_overrides,
-    show_validation_error,
-)
 
 
 @app.command(
@@ -40,8 +33,7 @@ def assemble_cli(
 
     DOCS: https://spacy.io/api/cli#assemble
     """
-    if verbose:
-        util.logger.setLevel(logging.DEBUG)
+    util.logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     # Make sure all files and paths exists if they are needed
     if not config_path or (str(config_path) != "-" and not config_path.exists()):
         msg.fail("Config file not found", config_path, exits=1)

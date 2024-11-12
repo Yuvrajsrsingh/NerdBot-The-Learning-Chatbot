@@ -5,4 +5,5 @@ streamlit_chat==0.1.1
 Wikipedia_API==0.7.1
 spacy==3.5.2
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.5.0/en_core_web_sm-3.5.0.tar.gz
+thinc==8.1.10
 

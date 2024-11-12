@@ -1,6 +1,7 @@
+from ...attrs import LIKE_NUM
+from ...attrs import IS_CURRENCY
 import unicodedata
 
-from ...attrs import IS_CURRENCY, LIKE_NUM
 
 _num_words = set(
     """

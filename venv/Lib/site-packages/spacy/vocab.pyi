@@ -1,17 +1,14 @@
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Union
-
-from cymem.cymem import Pool
+from typing import Callable, Iterator, Optional, Union, List, Dict
+from typing import Any, Iterable
 from thinc.types import Floats1d, FloatsXd
-
 from . import Language
+from .strings import StringStore
 from .lexeme import Lexeme
 from .lookups import Lookups
 from .morphology import Morphology
-from .strings import StringStore
 from .tokens import Doc, Span
 from .vectors import Vectors
+from pathlib import Path
 
 def create_vocab(
     lang: Optional[str], defaults: Any, vectors_name: Optional[str] = ...
@@ -69,8 +66,6 @@ class Vocab:
     def from_bytes(
         self, bytes_data: bytes, *, exclude: Iterable[str] = ...
     ) -> Vocab: ...
-    @contextmanager
-    def memory_zone(self, mem: Optional[Pool] = None) -> Iterator[Pool]: ...
 
 def pickle_vocab(vocab: Vocab) -> Any: ...
 def unpickle_vocab(

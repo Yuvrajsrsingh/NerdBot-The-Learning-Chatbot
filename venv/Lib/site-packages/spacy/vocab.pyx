@@ -1,26 +1,26 @@
-import functools
-from contextlib import ExitStack, contextmanager
-from typing import Iterator, Optional
+# cython: profile=True
+from libc.string cimport memcpy
 
 import numpy
 import srsly
 from thinc.api import get_array_module, get_current_ops
-from preshed.maps cimport map_clear
+import functools
 
-from .attrs cimport LANG, ORTH
-from .lexeme cimport EMPTY_LEXEME, OOV_RANK, Lexeme
-from .tokens.token cimport Token
+from .lexeme cimport EMPTY_LEXEME, OOV_RANK
+from .lexeme cimport Lexeme
 from .typedefs cimport attr_t
+from .tokens.token cimport Token
+from .attrs cimport LANG, ORTH
 
-from . import util
-from .attrs import IS_STOP, NORM, intify_attrs
 from .compat import copy_reg
 from .errors import Errors
-from .lang.lex_attrs import LEX_ATTRS, get_lang, is_stop
-from .lang.norm_exceptions import BASE_NORMS
+from .attrs import intify_attrs, NORM, IS_STOP
+from .vectors import Vectors, Mode as VectorsMode
+from .util import registry
 from .lookups import Lookups
-from .vectors import Mode as VectorsMode
-from .vectors import Vectors
+from . import util
+from .lang.norm_exceptions import BASE_NORMS
+from .lang.lex_attrs import LEX_ATTRS, is_stop, get_lang
 
 
 def create_vocab(lang, defaults, vectors_name=None):
@@ -50,17 +50,9 @@ cdef class Vocab:
 
     DOCS: https://spacy.io/api/vocab
     """
-    def __init__(
-        self,
-        lex_attr_getters=None,
-        strings=tuple(),
-        lookups=None,
-        oov_prob=-20.,
-        vectors_name=None,
-        writing_system={},  # no-cython-lint
-        get_noun_chunks=None,
-        **deprecated_kwargs
-    ):
+    def __init__(self, lex_attr_getters=None, strings=tuple(), lookups=None,
+                 oov_prob=-20., vectors_name=None, writing_system={},
+                 get_noun_chunks=None, **deprecated_kwargs):
         """Create the vocabulary.
 
         lex_attr_getters (dict): A dictionary mapping attribute IDs to
@@ -90,24 +82,16 @@ cdef class Vocab:
         self.lookups = lookups
         self.writing_system = writing_system
         self.get_noun_chunks = get_noun_chunks
-        # During a memory_zone we replace our mem object with one
-        # that's passed to us. We keep a reference to our non-temporary
-        # memory here, in case we need to make an allocation we want to
-        # guarantee is not temporary. This is also how we check whether
-        # we're in a memory zone: we check whether self.mem is self._non_temp_mem
-        self._non_temp_mem = self.mem
 
-    @property
-    def vectors(self):
-        return self._vectors
+    property vectors:
+        def __get__(self):
+            return self._vectors
 
-    @vectors.setter
-    def vectors(self, vectors):
-        if hasattr(vectors, "strings"):
+        def __set__(self, vectors):
             for s in vectors.strings:
-                self.strings.add(s, allow_transient=False)
-        self._vectors = vectors
-        self._vectors.strings = self.strings
+                self.strings.add(s)
+            self._vectors = vectors
+            self._vectors.strings = self.strings
 
     @property
     def lang(self):
@@ -116,43 +100,12 @@ cdef class Vocab:
             langfunc = self.lex_attr_getters.get(LANG, None)
         return langfunc("_") if langfunc else ""
 
-    @property
-    def in_memory_zone(self) -> bool:
-        return self.mem is not self._non_temp_mem
-
     def __len__(self):
         """The current number of lexemes stored.
 
         RETURNS (int): The current number of lexemes stored.
         """
         return self.length
-
-    @contextmanager
-    def memory_zone(self, mem: Optional[Pool] = None) -> Iterator[Pool]:
-        """Begin a block where resources allocated during the block will
-        be freed at the end of it. If a resources was created within the
-        memory zone block, accessing it outside the block is invalid.
-        Behaviour of this invalid access is undefined. Memory zones should
-        not be nested.
-
-        The memory zone is helpful for services that need to process large
-        volumes of text with a defined memory budget.
-        """
-        if mem is None:
-            mem = Pool()
-        # The ExitStack allows programmatic nested context managers.
-        # We don't know how many we need, so it would be awkward to have
-        # them as nested blocks.
-        with ExitStack() as stack:
-            contexts = [stack.enter_context(self.strings.memory_zone(mem))]
-            if hasattr(self.morphology, "memory_zone"):
-                contexts.append(stack.enter_context(self.morphology.memory_zone(mem)))
-            if hasattr(self._vectors, "memory_zone"):
-                contexts.append(stack.enter_context(self._vectors.memory_zone(mem)))
-            self.mem = mem
-            yield mem
-        self._clear_transient_orths()
-        self.mem = self._non_temp_mem
 
     def add_flag(self, flag_getter, int flag_id=-1):
         """Set a new boolean flag to words in the vocabulary.
@@ -188,13 +141,15 @@ cdef class Vocab:
 
     cdef const LexemeC* get(self, Pool mem, str string) except NULL:
         """Get a pointer to a `LexemeC` from the lexicon, creating a new
-        `Lexeme` if necessary.
+        `Lexeme` if necessary using memory acquired from the given pool. If the
+        pool is the lexicon's own memory, the lexeme is saved in the lexicon.
         """
         if string == "":
             return &EMPTY_LEXEME
         cdef LexemeC* lex
         cdef hash_t key = self.strings[string]
         lex = <LexemeC*>self._by_orth.get(key)
+        cdef size_t addr
         if lex != NULL:
             assert lex.orth in self.strings
             if lex.orth != key:
@@ -219,13 +174,21 @@ cdef class Vocab:
             return self._new_lexeme(mem, self.strings[orth])
 
     cdef const LexemeC* _new_lexeme(self, Pool mem, str string) except NULL:
-        # The mem argument is deprecated, replaced by memory zones. Same with
-        # this size heuristic.
+        # I think this heuristic is bad, and the Vocab should always
+        # own the lexemes. It avoids weird bugs this way, as it's how the thing
+        # was originally supposed to work. The best solution to the growing
+        # memory use is to periodically reset the vocab, which is an action
+        # that should be up to the user to do (so we don't need to keep track
+        # of the doc ownership).
+        # TODO: Change the C API so that the mem isn't passed in here.
         mem = self.mem
+        #if len(string) < 3 or self.length < 10000:
+        #    mem = self.mem
+        cdef bint is_oov = mem is not self.mem
         lex = <LexemeC*>mem.alloc(1, sizeof(LexemeC))
-        lex.orth = self.strings.add(string, allow_transient=True)
+        lex.orth = self.strings.add(string)
         lex.length = len(string)
-        if self.vectors is not None and hasattr(self.vectors, "key2row"):
+        if self.vectors is not None:
             lex.id = self.vectors.key2row.get(lex.orth, OOV_RANK)
         else:
             lex.id = OOV_RANK
@@ -233,25 +196,18 @@ cdef class Vocab:
             for attr, func in self.lex_attr_getters.items():
                 value = func(string)
                 if isinstance(value, str):
-                    value = self.strings.add(value, allow_transient=True)
+                    value = self.strings.add(value)
                 if value is not None:
                     Lexeme.set_struct_attr(lex, attr, value)
-        self._add_lex_to_vocab(lex.orth, lex, self.mem is not self._non_temp_mem)
+        if not is_oov:
+            self._add_lex_to_vocab(lex.orth, lex)
         if lex == NULL:
             raise ValueError(Errors.E085.format(string=string))
         return lex
 
-    cdef int _add_lex_to_vocab(self, hash_t key, const LexemeC* lex, bint is_transient) except -1:
+    cdef int _add_lex_to_vocab(self, hash_t key, const LexemeC* lex) except -1:
         self._by_orth.set(lex.orth, <void*>lex)
         self.length += 1
-        if is_transient and self.in_memory_zone:
-            self._transient_orths.push_back(lex.orth)
-
-    def _clear_transient_orths(self):
-        """Remove transient lexemes from the index (generally at the end of the memory zone)"""
-        for orth in self._transient_orths:
-            map_clear(self._by_orth.c_map, orth)
-        self._transient_orths.clear()
 
     def __contains__(self, key):
         """Check whether the string or int key has an entry in the vocabulary.
@@ -303,7 +259,7 @@ cdef class Vocab:
         """
         cdef attr_t orth
         if isinstance(id_or_string, str):
-            orth = self.strings.add(id_or_string, allow_transient=True)
+            orth = self.strings.add(id_or_string)
         else:
             orth = id_or_string
         return Lexeme(self, orth)
@@ -328,17 +284,12 @@ cdef class Vocab:
 
     @property
     def vectors_length(self):
-        if hasattr(self.vectors, "shape"):
-            return self.vectors.shape[1]
-        else:
-            return -1
+        return self.vectors.shape[1]
 
     def reset_vectors(self, *, width=None, shape=None):
         """Drop the current vector table. Because all vectors must be the same
         width, you have to call this to change the size of the vectors.
         """
-        if not isinstance(self.vectors, Vectors):
-            raise ValueError(Errors.E849.format(method="reset_vectors", vectors_type=type(self.vectors)))
         if width is not None and shape is not None:
             raise ValueError(Errors.E065.format(width=width, shape=shape))
         elif shape is not None:
@@ -348,8 +299,6 @@ cdef class Vocab:
             self.vectors = Vectors(strings=self.strings, shape=(self.vectors.shape[0], width))
 
     def deduplicate_vectors(self):
-        if not isinstance(self.vectors, Vectors):
-            raise ValueError(Errors.E849.format(method="deduplicate_vectors", vectors_type=type(self.vectors)))
         if self.vectors.mode != VectorsMode.default:
             raise ValueError(Errors.E858.format(
                 mode=self.vectors.mode,
@@ -403,8 +352,6 @@ cdef class Vocab:
 
         DOCS: https://spacy.io/api/vocab#prune_vectors
         """
-        if not isinstance(self.vectors, Vectors):
-            raise ValueError(Errors.E849.format(method="prune_vectors", vectors_type=type(self.vectors)))
         if self.vectors.mode != VectorsMode.default:
             raise ValueError(Errors.E858.format(
                 mode=self.vectors.mode,
@@ -417,13 +364,8 @@ cdef class Vocab:
             self[orth]
         # Make prob negative so it sorts by rank ascending
         # (key2row contains the rank)
-        priority = []
-        cdef Lexeme lex
-        cdef attr_t value
-        for lex in self:
-            value = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
-            if value in self.vectors.key2row:
-                priority.append((-lex.prob, self.vectors.key2row[value], value))
+        priority = [(-lex.prob, self.vectors.key2row[lex.orth], lex.orth)
+                    for lex in self if lex.orth in self.vectors.key2row]
         priority.sort()
         indices = xp.asarray([i for (prob, i, key) in priority], dtype="uint64")
         keys = xp.asarray([key for (prob, i, key) in priority], dtype="uint64")
@@ -455,11 +397,9 @@ cdef class Vocab:
         DOCS: https://spacy.io/api/vocab#get_vector
         """
         if isinstance(orth, str):
-            orth = self.strings.add(orth, allow_transient=True)
-        cdef Lexeme lex = self[orth]
-        key = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
-        if self.has_vector(key):
-            return self.vectors[key]
+            orth = self.strings.add(orth)
+        if self.has_vector(orth):
+            return self.vectors[orth]
         xp = get_array_module(self.vectors.data)
         vectors = xp.zeros((self.vectors_length,), dtype="f")
         return vectors
@@ -474,17 +414,16 @@ cdef class Vocab:
         DOCS: https://spacy.io/api/vocab#set_vector
         """
         if isinstance(orth, str):
-            orth = self.strings.add(orth, allow_transient=False)
-        cdef Lexeme lex = self[orth]
-        key = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
-        if self.vectors.is_full and key not in self.vectors:
+            orth = self.strings.add(orth)
+        if self.vectors.is_full and orth not in self.vectors:
             new_rows = max(100, int(self.vectors.shape[0]*1.3))
             if self.vectors.shape[1] == 0:
                 width = vector.size
             else:
                 width = self.vectors.shape[1]
             self.vectors.resize((new_rows, width))
-        row = self.vectors.add(key, vector=vector)
+        lex = self[orth]  # Add word to vocab if necessary
+        row = self.vectors.add(orth, vector=vector)
         if row >= 0:
             lex.rank = row
 
@@ -498,23 +437,21 @@ cdef class Vocab:
         DOCS: https://spacy.io/api/vocab#has_vector
         """
         if isinstance(orth, str):
-            orth = self.strings.add(orth, allow_transient=True)
-        cdef Lexeme lex = self[orth]
-        key = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
-        return key in self.vectors
+            orth = self.strings.add(orth)
+        return orth in self.vectors
 
-    @property
-    def lookups(self):
-        return self._lookups
+    property lookups:
+        def __get__(self):
+            return self._lookups
 
-    @lookups.setter
-    def lookups(self, lookups):
-        self._lookups = lookups
-        if lookups.has_table("lexeme_norm"):
-            self.lex_attr_getters[NORM] = util.add_lookups(
-                self.lex_attr_getters.get(NORM, LEX_ATTRS[NORM]),
-                self.lookups.get_table("lexeme_norm"),
-            )
+        def __set__(self, lookups):
+            self._lookups = lookups
+            if lookups.has_table("lexeme_norm"):
+                self.lex_attr_getters[NORM] = util.add_lookups(
+                    self.lex_attr_getters.get(NORM, LEX_ATTRS[NORM]),
+                    self.lookups.get_table("lexeme_norm"),
+                )
+
 
     def to_disk(self, path, *, exclude=tuple()):
         """Save the current state to a directory.
@@ -528,6 +465,7 @@ cdef class Vocab:
         path = util.ensure_path(path)
         if not path.exists():
             path.mkdir()
+        setters = ["strings", "vectors"]
         if "strings" not in exclude:
             self.strings.to_disk(path / "strings.json")
         if "vectors" not in exclude:
@@ -546,6 +484,7 @@ cdef class Vocab:
         DOCS: https://spacy.io/api/vocab#to_disk
         """
         path = util.ensure_path(path)
+        getters = ["strings", "vectors"]
         if "strings" not in exclude:
             self.strings.from_disk(path / "strings.json")  # TODO: add exclude?
         if "vectors" not in exclude:

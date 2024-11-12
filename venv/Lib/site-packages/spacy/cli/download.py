@@ -1,22 +1,14 @@
-import sys
 from typing import Optional, Sequence
-from urllib.parse import urljoin
-
 import requests
-import typer
+import sys
 from wasabi import msg
+import typer
 
+from ._util import app, Arg, Opt, WHEEL_SUFFIX, SDIST_SUFFIX
 from .. import about
+from ..util import is_package, get_minor_version, run_command
+from ..util import is_prerelease_version
 from ..errors import OLD_MODEL_SHORTCUTS
-from ..util import (
-    get_minor_version,
-    is_in_interactive,
-    is_in_jupyter,
-    is_package,
-    is_prerelease_version,
-    run_command,
-)
-from ._util import SDIST_SUFFIX, WHEEL_SUFFIX, Arg, Opt, app
 
 
 @app.command(
@@ -64,13 +56,6 @@ def download(
         )
         pip_args = pip_args + ("--no-deps",)
     if direct:
-        # Reject model names with '/', in order to prevent shenanigans.
-        if "/" in model:
-            msg.fail(
-                title="Model download rejected",
-                text=f"Cannot download model '{model}'. Models are expected to be file names, not URLs or fragments",
-                exits=True,
-            )
         components = model.split("-")
         model_name = "".join(components[:-1])
         version = components[-1]
@@ -92,33 +77,15 @@ def download(
         "Download and installation successful",
         f"You can now load the package via spacy.load('{model_name}')",
     )
-    if is_in_jupyter():
-        reload_deps_msg = (
-            "If you are in a Jupyter or Colab notebook, you may need to "
-            "restart Python in order to load all the package's dependencies. "
-            "You can do this by selecting the 'Restart kernel' or 'Restart "
-            "runtime' option."
-        )
-        msg.warn(
-            "Restart to reload dependencies",
-            reload_deps_msg,
-        )
-    elif is_in_interactive():
-        reload_deps_msg = (
-            "If you are in an interactive Python session, you may need to "
-            "exit and restart Python to load all the package's dependencies. "
-            "You can exit with Ctrl-D (or Ctrl-Z and Enter on Windows)."
-        )
-        msg.warn(
-            "Restart to reload dependencies",
-            reload_deps_msg,
-        )
 
 
 def get_model_filename(model_name: str, version: str, sdist: bool = False) -> str:
     dl_tpl = "{m}-{v}/{m}-{v}{s}"
+    egg_tpl = "#egg={m}=={v}"
     suffix = SDIST_SUFFIX if sdist else WHEEL_SUFFIX
     filename = dl_tpl.format(m=model_name, v=version, s=suffix)
+    if sdist:
+        filename += egg_tpl.format(m=model_name, v=version)
     return filename
 
 
@@ -161,16 +128,7 @@ def get_latest_version(model: str) -> str:
 def download_model(
     filename: str, user_pip_args: Optional[Sequence[str]] = None
 ) -> None:
-    # Construct the download URL carefully. We need to make sure we don't
-    # allow relative paths or other shenanigans to trick us into download
-    # from outside our own repo.
-    base_url = about.__download_url__
-    # urljoin requires that the path ends with /, or the last path part will be dropped
-    if not base_url.endswith("/"):
-        base_url = about.__download_url__ + "/"
-    download_url = urljoin(base_url, filename)
-    if not download_url.startswith(about.__download_url__):
-        raise ValueError(f"Download from {filename} rejected. Was it a relative path?")
+    download_url = about.__download_url__ + "/" + filename
     pip_args = list(user_pip_args) if user_pip_args is not None else []
     cmd = [sys.executable, "-m", "pip", "install"] + pip_args + [download_url]
     run_command(cmd)

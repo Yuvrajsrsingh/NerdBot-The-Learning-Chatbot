@@ -1,10 +1,6 @@
-# cython: profile=False
 from typing import List
-
-import numpy
-
 from ..errors import Errors
-
+import numpy
 from libc.stdint cimport int32_t
 
 

@@ -1,8 +1,7 @@
 from typing import Dict, List
-
-from ...symbols import NORM, ORTH
-from ...util import update_exc
 from ..tokenizer_exceptions import BASE_EXCEPTIONS
+from ...symbols import ORTH, NORM
+from ...util import update_exc
 
 _exc: Dict[str, List[Dict]] = {}
 
